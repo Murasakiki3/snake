@@ -1,37 +1,117 @@
 #include "snake.h"
 #include "ui_snake.h"
+#include "startmenu.h"
 #include<QPainter>
 #include<QTimer>
 #include<QKeyEvent>
 #include <QRandomGenerator>
+#include <QVBoxLayout>
 #include <QDebug>
+
+namespace {
+
+//从 "3"、"3;" 这类文本里取出第一个整数。
+//直接 toInt() 遇到分号会失败并返回 0，曾经导致所有玩家的 playerID 都是 0。
+int firstInt(const QString &text)
+{
+    int begin = -1;
+
+    for(int i=0;i<text.size();i++)
+    {
+        const QChar c = text.at(i);
+
+        if(c.isDigit())
+        {
+            if(begin<0)
+                begin = i;
+        }
+        else if(begin>=0)
+        {
+            break;
+        }
+    }
+
+    if(begin<0)
+        return 0;
+
+    int end = begin;
+
+    while(end<text.size() && text.at(end).isDigit())
+        end++;
+
+    return text.mid(begin, end-begin).toInt();
+}
+
+} // namespace
+
 Snake::Snake(QWidget *parent)
     : QMainWindow(parent)
-    , ui(new Ui::Snake),
-      blsRun(false), //初始：游戏未开始
-      Speed(500),//500ms刷新一次
-      getID(false),
-      playerID(0)
+    , ui(new Ui::Snake)
+    , m_menu(nullptr)
+    , m_mode(ModeMenu)
+    , m_connecting(false)
+    , getID(false)
+    , playerID(0)
+    , socket(nullptr)
+    , m_pendingHost(QStringLiteral("127.0.0.1"))
+    , m_pendingPort(8888)
+    , timer(nullptr)
+    , nDirection(2)
+    , blsRun(false)
+    , blsOver(false)
+    , Score(0)
+    , Speed(500)
 {
     ui->setupUi(this); //加载ui
-    qDebug()<<"Snake启动";
+
+    this->setWindowTitle(QStringLiteral("贪吃蛇"));
     this->setFocusPolicy(Qt::StrongFocus);
-    socket = new QTcpSocket(this);
-    socket->connectToHost("127.0.0.1",8888 );
-    connect(socket,&QTcpSocket::readyRead,this,&Snake::receiveData);
-    qDebug()<<"连接服务器成功";
-    this->setGeometry(QRect(1000,300,560,580));//设置窗体位置：Qrect表示矩形框，这个矩形框放在距离屏幕左侧600单位，距离屏幕上方300单位，长290，高310.
+    this->setGeometry(QRect(1000,300,560,580));//设置窗体位置
+
+    //计时器只创建一次，整局游戏复用（避免重开时反复 new/connect 造成泄漏）
+    timer = new QTimer(this);
+    connect(timer,SIGNAL(timeout()),SLOT(Snake_update()));
+
+    //开始菜单作为中央部件的子控件，用布局铺满整个客户区
+    m_menu = new StartMenu(ui->centralwidget);
+    QVBoxLayout *menuLayout = new QVBoxLayout(ui->centralwidget);
+    menuLayout->setContentsMargins(0,0,0,0);
+    menuLayout->addWidget(m_menu);
+
+    connect(m_menu,&StartMenu::singlePlayerRequested,
+            this,&Snake::onSinglePlayerRequested);
+    connect(m_menu,&StartMenu::multiplayerConnectRequested,
+            this,&Snake::onMultiplayerConnectRequested);
+    connect(m_menu,&StartMenu::quitRequested,this,&Snake::close);
+
+    qDebug()<<"Snake启动，进入主菜单";
+
+    //启动时不连接服务器、不开始游戏，等玩家在菜单里选择
+    showMenuOverlay();
 }
 
 
 Snake::~Snake()
 {
+    if(timer)
+        timer->stop();
+
     delete ui; //结束ui 释放内存
 }
 
 
 //实现游戏界面，所有在游戏界面中显示的都要在这个函数中实现，这一函数在第一次启动程序和调用update的时候会被执行
 void Snake::paintEvent(QPaintEvent *event){ //所有的绘图都要在paintEvent函数里面进行
+    Q_UNUSED(event)
+
+    //在主菜单时游戏区域不绘制，全部交给 StartMenu
+    if(m_mode==ModeMenu)
+    {
+        QPainter menuPainter(this);
+        menuPainter.fillRect(rect(),QColor(20,33,26));
+        return;
+    }
+
     QPainter painter(this);  //创建画家 在窗口绘图
     if(!blsRun)//只在第一次运行的时候初始化蛇
         InitSnake();    //在游戏界面中出现蛇
@@ -78,13 +158,7 @@ void Snake::paintEvent(QPaintEvent *event){ //所有的绘图都要在paintEvent
          it++)
     {
 
-
         //如果是自己的ID，跳过
-        qDebug()
-            <<"我的ID:"
-            <<playerID
-            <<"当前ID:"
-            <<it.key();
         if(it.key()==playerID)
         {
             continue;
@@ -121,6 +195,26 @@ void Snake::paintEvent(QPaintEvent *event){ //所有的绘图都要在paintEvent
     //painter.drawRect(Food);
     painter.drawPixmap(Food,QPixmap(":/new/img/img/Apple.png"));
 
+    //底部状态提示
+    QFont font3("Microsoft YaHei",10);
+    painter.setFont(font3);
+    if(blsOver)
+    {
+        painter.setPen(QColor(255,220,80));
+        painter.drawText(QRect(20,536,254,24),
+                         Qt::AlignLeft|Qt::AlignVCenter,
+                         QStringLiteral("按 R 重新开始   按 Esc 返回主菜单"));
+    }
+    else if(m_mode==ModeMulti)
+    {
+        painter.setPen(QColor(60,120,70));
+        painter.drawText(QRect(20,536,254,24),
+                         Qt::AlignLeft|Qt::AlignVCenter,
+                         QStringLiteral("联机中  玩家ID %1  在线 %2 人")
+                             .arg(playerID)
+                             .arg(OtherPlayers.size()));
+    }
+
     //游戏停止，通过让计时器停止来结束
     if(blsOver)
         timer->stop();
@@ -132,32 +226,51 @@ void Snake::paintEvent(QPaintEvent *event){ //所有的绘图都要在paintEvent
 //用来说明代表蛇的小方块应该画在什么地方
 void Snake::InitSnake(){
     //第一次进来的时候显示“游戏开始”
-    Display="游戏开始！";
+    Display = (m_mode==ModeMulti) ? QStringLiteral("联机开始！")
+                                  : QStringLiteral("游戏开始！");
     blsRun=true;//游戏开始了，令成true
     blsOver=false;//游戏没有结束
     nDirection=2;//默认刚开始蛇的移动方向是向下
     Food=CreateFood();//在游戏开始的时候产生食物
     Score=0;//初始化得分=0
-
+    Speed=500;//重置速度（吃到食物会变快，重开时必须还原）
 
     //矩形框
-    //QRect rect(100,70,10,10);//蛇距离左，上边界各100，70单位
-    //vSnakeRect=rect;//用这个小方块初始化蛇
+    vSnakeRect.clear();
     vSnakeRect.resize(5);//蛇的长度
     //用for循环实现蛇
     for(int i=0;i<vSnakeRect.size();i++){
         QRect rect(200, 140 + 20*i, 20, 20);
         vSnakeRect[vSnakeRect.size()-1-i]=rect;
     }
-    //对计时器的设定
-    timer=new QTimer(this);//设定计时器
+
     timer->start(Speed);//设定计时器的间隔时间为500ms，用speed表示更统一
-    connect(timer,SIGNAL(timeout()),SLOT(Snake_update()));//SIGNAL:信号 SLOT：槽,对信号和槽的连接
 }
 
 
 void Snake::keyPressEvent(QKeyEvent *event)
 {
+    //Esc 从游戏中返回主菜单
+    if(event->key()==Qt::Key_Escape)
+    {
+        if(m_mode!=ModeMenu)
+            showMenuOverlay();
+
+        return;
+    }
+
+    //R 在游戏结束后重开一局
+    if(event->key()==Qt::Key_R)
+    {
+        if(m_mode!=ModeMenu && blsOver)
+            restartGame();
+
+        return;
+    }
+
+    //菜单里或已经结束时，方向键不生效
+    if(m_mode==ModeMenu || blsOver)
+        return;
 
     switch(event->key())
     {
@@ -235,30 +348,36 @@ void Snake::Snake_update(){
     vSnakeRect[0]=SnakeHead;
 
 
-    //发送整条蛇数据
-
-    QString data;
-
-    data += QString::number(playerID);
-
-    data += ",";
-
-    data += QString::number(vSnakeRect.size());
-
-
-    for(int i=0;i<vSnakeRect.size();i++)
+    //单人模式不联网，只有联机模式才发送整条蛇数据
+    if(m_mode==ModeMulti
+        && socket
+        && socket->state()==QAbstractSocket::ConnectedState)
     {
+        QString data;
+
+        data += QString::number(playerID);
 
         data += ",";
-        data += QString::number(vSnakeRect[i].x());
 
-        data += ",";
-        data += QString::number(vSnakeRect[i].y());
+        data += QString::number(vSnakeRect.size());
 
+
+        for(int i=0;i<vSnakeRect.size();i++)
+        {
+
+            data += ",";
+            data += QString::number(vSnakeRect[i].x());
+
+            data += ",";
+            data += QString::number(vSnakeRect[i].y());
+
+        }
+
+        //';' 表示一条玩家记录结束，服务端按这个切分
+        data += ";";
+
+        socket->write(data.toUtf8());
     }
-
-
-    socket->write(data.toUtf8());
 
 
 
@@ -327,124 +446,298 @@ void Snake::IsWin(){
 
 void Snake::receiveData()
 {
+    if(!socket)
+        return;
 
-    QByteArray data =
-        socket->readAll();
+    m_buffer += socket->readAll();
 
+    //服务端每发完一帧完整的世界状态就补一个 '\n'，用它作为帧结束标记。
+    //这样即使 TCP 把多帧粘在一起、或者把一帧拆成几次送达，都能正确解析。
+    int newlineIndex;
 
-
-    QString str(data);
-
-    if(str.startsWith("QUIT"))
+    while((newlineIndex = m_buffer.indexOf('\n')) != -1)
     {
+        QByteArray line = m_buffer.left(newlineIndex);
+        m_buffer.remove(0, newlineIndex+1);
 
-        QStringList list =
-            str.split(",");
+        if(!line.isEmpty())
+            processLine(QString::fromUtf8(line));
+    }
+}
 
 
-        int id =
-            list[1].toInt();
+//处理服务端发来的一条完整消息
+void Snake::processLine(const QString &line)
+{
+    //1) 握手：服务端分配玩家ID, 格式 "ID,<编号>"
+    if(line.startsWith(QLatin1String("ID,")))
+    {
+        playerID = firstInt(line.mid(3));
+        getID = true;
 
+        qDebug()<<"获得玩家ID:"<<playerID;
 
-        OtherPlayers.remove(id);
+        //等待期间玩家可能已经按 Esc 回菜单了，这里再确认一次
+        if(m_connecting)
+        {
+            m_connecting = false;
+            startGame(ModeMulti);
+        }
 
+        return;
+    }
+
+    //2) 玩家退出, 格式 "QUIT,<编号>"
+    if(line.startsWith(QLatin1String("QUIT,")))
+    {
+        QStringList list = line.split(",");
+
+        if(list.size()>=2)
+            OtherPlayers.remove(firstInt(list[1]));
 
         update();
 
-
         return;
-
     }
 
-
-
-
-    //按照玩家分割
-
-    QStringList playerList =
-        str.split(";");
-
-
-
-    //清除上一帧数据
+    //3) 一帧完整的世界状态："id,长度,x,y,x,y,...;id,长度,x,y,...;"
 
     OtherPlayers.clear();
 
-
+    QStringList playerList = line.split(';', Qt::SkipEmptyParts);
 
     for(QString playerData : playerList)
     {
-
-
-        //防止最后一个空数据
-
-        if(playerData.isEmpty())
-            continue;
-
-
-
-        QStringList list =
-            playerData.split(",");
-
-
+        QStringList list = playerData.split(",");
 
         if(list.size()<2)
             continue;
 
+        int id = firstInt(list[0]);
 
+        int length = firstInt(list[1]);
 
-        //玩家ID
-
-        int id =
-            list[0].toInt();
-
-
-
-        //蛇长度
-
-        int length =
-            list[1].toInt();
-
-
+        //长度非法或数据不完整就跳过，避免越界
+        if(length<=0 || list.size() < 2 + length*2)
+            continue;
 
         QVector<QRect> snake;
 
-
-
         int index=2;
-
-
 
         for(int i=0;i<length;i++)
         {
+            int x = list[index++].toInt();
 
+            int y = list[index++].toInt();
 
-            int x =
-                list[index++].toInt();
-
-
-            int y =
-                list[index++].toInt();
-
-
-
-            snake.push_back(
-                QRect(x,y,20,20)
-                );
-
-
+            snake.push_back(QRect(x,y,20,20));
         }
 
-
-
-        //保存玩家蛇
-
         OtherPlayers[id]=snake;
-
-
-
     }
 
+    update();
+}
+
+
+//———————————— 菜单与游戏流程 ————————————
+
+void Snake::onSinglePlayerRequested()
+{
+    qDebug()<<"选择单人游玩";
+
+    teardownSocket();
+
+    startGame(ModeSingle);
+}
+
+
+void Snake::onMultiplayerConnectRequested(const QString &host, quint16 port)
+{
+    qDebug()<<"选择联机对战:"<<host<<port;
+
+    m_pendingHost = host;
+    m_pendingPort = port;
+
+    teardownSocket();
+
+    m_buffer.clear();
+    getID = false;
+    playerID = 0;
+    m_connecting = true;
+
+    socket = new QTcpSocket(this);
+
+    connect(socket,&QTcpSocket::readyRead,this,&Snake::receiveData);
+    connect(socket,&QTcpSocket::connected,this,&Snake::onSocketConnected);
+    connect(socket,&QAbstractSocket::errorOccurred,this,&Snake::onSocketError);
+    connect(socket,&QTcpSocket::disconnected,this,&Snake::onSocketDisconnected);
+
+    socket->connectToHost(host,port);
+}
+
+
+void Snake::onSocketConnected()
+{
+    qDebug()<<"已连接服务器，等待分配ID";
+
+    if(m_menu && m_menu->isVisible())
+        m_menu->setStatus(QStringLiteral("已连接，等待服务器分配 ID ..."));
+
+    //握手超时保护：连上了但服务端一直不给ID（例如跑的是旧版本服务端）
+    QTimer::singleShot(5000,this,[this]()
+    {
+        if(!m_connecting || getID)
+            return;
+
+        qDebug()<<"等待ID超时";
+
+        if(m_menu && m_menu->isVisible())
+        {
+            m_menu->setStatus(QStringLiteral("已连接但未收到 ID，请确认服务端已更新到最新版本"),true);
+            m_menu->setBusy(false);
+        }
+
+        teardownSocket();
+        m_connecting = false;
+    });
+}
+
+
+void Snake::onSocketError(QAbstractSocket::SocketError error)
+{
+    Q_UNUSED(error)
+
+    const QString msg = socket ? socket->errorString() : QStringLiteral("未知错误");
+
+    qDebug()<<"网络错误:"<<msg;
+
+    if(m_mode==ModeMenu)
+    {
+        //还在菜单里，展示错误让玩家重试
+        if(m_menu && m_menu->isVisible())
+        {
+            m_menu->setStatus(QStringLiteral("连接失败：%1").arg(msg),true);
+            m_menu->setBusy(false);
+        }
+
+        teardownSocket();
+        m_connecting = false;
+    }
+    else
+    {
+        //游戏中掉线
+        Display = QStringLiteral("连接已断开");
+        blsOver = true;
+        timer->stop();
+        update();
+    }
+}
+
+
+void Snake::onSocketDisconnected()
+{
+    qDebug()<<"与服务器断开连接";
+
+    if(m_mode==ModeMulti && !blsOver)
+    {
+        Display = QStringLiteral("连接已断开");
+        blsOver = true;
+        timer->stop();
+        update();
+    }
+}
+
+
+void Snake::startGame(GameMode mode)
+{
+    m_mode = mode;
+    blsRun = false;   //交给 paintEvent 触发 InitSnake()
+    blsOver = false;
+    nDirection = 2;
+    Speed = 500;
+    Score = 0;
+    Display.clear();
+    vSnakeRect.clear();
+    OtherPlayers.clear();
+
+    if(!m_buffer.isEmpty())
+        m_buffer.clear();
+
+    if(m_menu)
+        m_menu->hide();
+
+    setFocus();
+    activateWindow();
+    update();
+}
+
+
+void Snake::showMenuOverlay()
+{
+    m_mode = ModeMenu;
+    blsRun = false;
+    blsOver = false;
+    nDirection = 2;
+    Speed = 500;
+    Score = 0;
+    Display.clear();
+    vSnakeRect.clear();
+    OtherPlayers.clear();
+
+    if(timer)
+        timer->stop();
+
+    teardownSocket();
+    m_connecting = false;
+
+    if(m_menu)
+    {
+        m_menu->showMainPage();
+        m_menu->show();
+        m_menu->raise();
+        m_menu->setFocus();
+    }
 
     update();
+}
+
+
+void Snake::restartGame()
+{
+    if(m_mode==ModeMenu)
+    {
+        showMenuOverlay();
+        return;
+    }
+
+    blsRun = false;
+    blsOver = false;
+    nDirection = 2;
+    Speed = 500;
+    Score = 0;
+    Display.clear();
+    vSnakeRect.clear();
+
+    timer->stop();
+
+    setFocus();
+    update();
+}
+
+
+void Snake::teardownSocket()
+{
+    if(socket)
+    {
+        //先断开所有信号，避免在回调里把自己删掉
+        socket->disconnect(this);
+        socket->abort();
+        socket->deleteLater();
+        socket = nullptr;
+    }
+
+    m_buffer.clear();
+    getID = false;
 }

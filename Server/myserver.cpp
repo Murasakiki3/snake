@@ -1,6 +1,14 @@
 #include "myserver.h"
 #include <QDebug>
 
+//协议说明（客户端 Snake 必须与之匹配）
+//  服务端 -> 客户端
+//    连接建立:  "ID,<编号>\n"                        给新玩家分配ID（单独一帧，不带 ';'）
+//    每帧广播:  "<id>,<长度>,<x>,<y>,...;...;\n"     所有玩家的蛇，末尾 '\n' 是一帧的结束标记
+//    玩家退出:  "QUIT,<编号>\n"
+//  客户端 -> 服务端
+//    每帧一次:  "<id>,<长度>,<x>,<y>,...;"           一条记录以 ';' 结束
+
 MyServer::MyServer()
 {
     playerCount = 0;
@@ -28,22 +36,46 @@ void MyServer::onReadyRead()
 
 
 
-    QByteArray data =
-        socket->readAll();
+    //累积到该连接自己的缓冲里，按 ';' 切出一条条完整记录。
+    //这样即使一次 write 被拆成多次到达、或多帧粘在一起，也不会解析错位。
+    QByteArray &buffer = clientBuffers[socket];
+
+    buffer += socket->readAll();
 
 
+
+    int index;
+
+    while((index = buffer.indexOf(';')) != -1)
+    {
+
+        QByteArray record = buffer.left(index);
+
+        buffer.remove(0, index+1);
+
+
+        if(record.isEmpty())
+            continue;
+
+
+        processRecord(socket, QString::fromUtf8(record));
+
+    }
+
+}
+
+
+void MyServer::processRecord(QTcpSocket *socket, const QString &record)
+{
 
     qDebug()
         <<"收到玩家数据:"
-        <<data;
+        <<record;
 
-
-
-    QString str(data);
 
 
     QStringList list =
-        str.split(",");
+        record.split(",");
 
 
 
@@ -64,6 +96,14 @@ void MyServer::onReadyRead()
 
 
 
+    //长度非法或数据不完整就丢弃，避免越界
+    if(length<=0 || list.size() < 2 + length*2)
+    {
+        return;
+    }
+
+
+
     QVector<QRect> snake;
 
 
@@ -75,14 +115,8 @@ void MyServer::onReadyRead()
     for(int i=0;i<length;i++)
     {
 
-
-        if(index+1 >= list.size())
-            return;
-
-
         int x =
             list[index++].toInt();
-
 
         int y =
             list[index++].toInt();
@@ -101,6 +135,8 @@ void MyServer::onReadyRead()
 
     players[socket].snake = snake;
 
+    players[socket].id = id;
+
 
 
     qDebug()
@@ -109,9 +145,16 @@ void MyServer::onReadyRead()
 
 
 
-    //发送所有玩家蛇数据
+    broadcastWorld();
+
+}
+
+
+void MyServer::broadcastWorld()
+{
 
     QString allData;
+
 
 
     for(auto it = players.begin();
@@ -126,7 +169,6 @@ void MyServer::onReadyRead()
 
 
         allData += ",";
-
 
         allData += QString::number(p.snake.size());
 
@@ -153,6 +195,11 @@ void MyServer::onReadyRead()
 
 
 
+    //一帧的结束标记，客户端靠它判断“这一帧收全了”
+    allData += "\n";
+
+
+
     //发送给所有客户端
 
     for(QTcpSocket *client:clients)
@@ -165,6 +212,7 @@ void MyServer::onReadyRead()
     }
 
 }
+
 
 // 客户端断开连接的槽函数
 void MyServer::clientDisconnected()
@@ -179,9 +227,10 @@ void MyServer::clientDisconnected()
         clients.removeOne(socket);
         players.remove(socket);
         playerIDs.remove(socket);
+        clientBuffers.remove(socket);
 
         // 广播玩家退出消息
-        QString msg = QString("QUIT,%1").arg(id);
+        QString msg = QString("QUIT,%1\n").arg(id);
         for(QTcpSocket *client : clients)
         {
             client->write(msg.toUtf8());
@@ -203,8 +252,9 @@ void MyServer::incomingConnection(qintptr socketDescriptor)
     connect(socket, SIGNAL(readyRead()), this, SLOT(onReadyRead()));
 
     int newId = playerCount;
-    socket->write(QString::number(newId).toUtf8());
-    qDebug() << "玩家ID:" << newId;
+
+    clientBuffers[socket].clear();
+
     Player p;
 
 
@@ -230,6 +280,12 @@ void MyServer::incomingConnection(qintptr socketDescriptor)
 
 
     players[socket]=p;
-   playerIDs[socket] = newId;
+    playerIDs[socket] = newId;
     playerCount++;
+
+    // 握手：带明确前缀和结束符，客户端据此认出自己的ID。
+    // 旧版本这里直接发一个裸数字，客户端无法与玩家数据区分，会导致 playerID 永远为 0。
+    // 注意这里不要加 ';'，handshake 本身就是一帧，加 ';' 会让客户端解析出非法整数。
+    socket->write(QString("ID,%1\n").arg(newId).toUtf8());
+    qDebug() << "玩家ID:" << newId;
 }

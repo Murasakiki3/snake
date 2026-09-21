@@ -10,10 +10,12 @@ CONFIG += c++11
 
 SOURCES += \
     main.cpp \
-    snake.cpp
+    snake.cpp \
+    startmenu.cpp
 
 HEADERS += \
-    snake.h
+    snake.h \
+    startmenu.h
 
 FORMS += \
     snake.ui
