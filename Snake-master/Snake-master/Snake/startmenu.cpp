@@ -28,6 +28,11 @@ QLabel#FieldLabel {
     color: #a8d8b4;
     font-size: 14px;
 }
+QLabel#Signature {
+    color: #86c79a;
+    font-size: 12px;
+    letter-spacing: 2px;
+}
 QPushButton {
     background-color: #2f6b3f;
     color: #eaffea;
@@ -68,6 +73,18 @@ const char *kStatusNormal = "color: #a8d8b4; font-size: 13px;";
 const char *kStatusError  = "color: #ff8a8a; font-size: 13px;";
 
 const char *kDefaultHint = "\xe6\x8f\x90\xe7\xa4\xba\xef\xbc\x9a\xe5\x85\x88\xe5\x9c\xa8\xe6\x9c\xac\xe6\x9c\xba\xe6\x88\x96\xe5\x8f\xa6\xe4\xb8\x80\xe5\x8f\xb0\xe6\x9c\xba\xe5\x99\xa8\xe4\xb8\x8a\xe8\xbf\x90\xe8\xa1\x8c Server \xe7\xa8\x8b\xe5\xba\x8f";
+
+//署名：出现在菜单每一页的底部
+QLabel *makeSignature()
+{
+    QLabel *label = new QLabel(QStringLiteral("Murasakiki3"));
+
+    label->setObjectName(QStringLiteral("Signature"));
+    label->setAlignment(Qt::AlignCenter);
+    label->setToolTip(QStringLiteral("测试：Murasakiki3"));
+
+    return label;
+}
 
 } // namespace
 
@@ -133,8 +150,10 @@ QWidget *StartMenu::buildMainPage()
     layout->addWidget(btnMulti, 0, Qt::AlignCenter);
     layout->addSpacing(12);
     layout->addWidget(btnQuit, 0, Qt::AlignCenter);
-    layout->addSpacing(28);
+    layout->addSpacing(26);
     layout->addWidget(hint);
+    layout->addSpacing(18);
+    layout->addWidget(makeSignature());
     layout->addStretch(1);
 
     return page;
@@ -198,6 +217,8 @@ QWidget *StartMenu::buildConnectPage()
     layout->addLayout(buttons);
     layout->addSpacing(22);
     layout->addWidget(m_statusLabel);
+    layout->addSpacing(16);
+    layout->addWidget(makeSignature());
     layout->addStretch(1);
 
     return page;

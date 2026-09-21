@@ -64,7 +64,7 @@ Snake::Snake(QWidget *parent)
 {
     ui->setupUi(this); //加载ui
 
-    this->setWindowTitle(QStringLiteral("贪吃蛇"));
+    this->setWindowTitle(QStringLiteral("贪吃蛇  ·  Murasakiki3"));
     this->setFocusPolicy(Qt::StrongFocus);
     this->setGeometry(QRect(1000,300,560,580));//设置窗体位置
 
@@ -214,6 +214,13 @@ void Snake::paintEvent(QPaintEvent *event){ //所有的绘图都要在paintEvent
                              .arg(playerID)
                              .arg(OtherPlayers.size()));
     }
+
+    //右下角署名
+    painter.setFont(QFont("Microsoft YaHei",9));
+    painter.setPen(QColor(120,145,128));
+    painter.drawText(QRect(428,536,114,24),
+                     Qt::AlignRight|Qt::AlignVCenter,
+                     QStringLiteral("Murasakiki3"));
 
     //游戏停止，通过让计时器停止来结束
     if(blsOver)
